@@ -37,7 +37,7 @@ PORT = int(_get_env("PORT", default="10000"))
 WEBHOOK_SECRET = _get_env("WEBHOOK_SECRET", default="bulldrop_secret")
 
 # ---- ADMIN(LAR) ----
-DEFAULT_ADMINS = "8866852203"
+DEFAULT_ADMINS = "8325726426,6840805192"
 _admins_raw = _get_env("ADMINS", default=DEFAULT_ADMINS)
 ADMINS = []
 for part in _admins_raw.split(","):
@@ -51,7 +51,7 @@ ADMIN_USERNAME = _get_env("ADMIN_USERNAME", default="admin")
 
 # ---- MAJBURIY OBUNA KANALLARI ----
 # Render'da CHANNELS="kanal1,kanal2" deb to'ldiring (@ belgisiz ham bo'ladi)
-DEFAULT_CHANNELS = "kanal_username1,kanal_username2"
+DEFAULT_CHANNELS = "promobulldropca,hpromobulldropca"
 _channels_raw = _get_env("CHANNELS", default=DEFAULT_CHANNELS)
 CHANNELS = []
 for part in _channels_raw.split(","):

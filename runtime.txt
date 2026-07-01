@@ -1,19 +1,1 @@
 python-3.11.9
-Bu papkaga 6 ta rasm qo'ying (nomlari aniq shunday bo'lishi kerak):
-
-  promorasm1.jpg
-  promorasm2.jpg
-  promorasm3.jpg
-  promorasm4.jpg
-  promorasm5.jpg
-  promorasm6.jpg
-
-Bot shu papkani bot.py bilan bir joyda (images/) qidiradi.
-Agar biror rasm topilmasa, bot yiqilib qolmaydi — o'sha case uchun
-oddiy matnli xabar yuboradi (rasmsiz), shuning uchun rasmlarni keyinroq
-qo'shsangiz ham bo'ladi.
-
-Render'ga deploy qilganda: images/ papkasini bot.py bilan bitta repo/papkada
-saqlang va rasmlarni git orqali yuklang (Render fayllarni saqlaydi, lekin
-disk vaqtinchalik bo'lishi mumkin — shu sabab rasmlarni git repo ichida
-saqlash tavsiya etiladi).

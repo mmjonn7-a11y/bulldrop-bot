@@ -1,6 +1,8 @@
 import datetime
 import functools
 import logging
+import os
+import random
 import time
 
 import telebot
@@ -26,6 +28,9 @@ log = logging.getLogger("bulldrop_bot")
 # ============================== BOT & FLASK ==============================
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False, parse_mode="HTML")
 app = Flask(__name__)
+
+# Promo "case" rasmlari shu papkadan olinadi: images/promorasm1.jpg ... promorasm6.jpg
+IMAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
 
 user_states = {}
 
@@ -56,7 +61,8 @@ def connect_mongo(retries=5, delay=3):
 mongo_client = connect_mongo()
 db = mongo_client[MONGO_DB_NAME]
 users_col = db["users"]
-promos_col = db["promo_codes"]
+cases_col = db["promo_cases"]
+codes_col = db["promo_case_codes"]
 shop_col = db["shop_items"]
 
 
@@ -172,35 +178,208 @@ def get_all_user_ids():
         return []
 
 
-# ============================== PROMOKODLAR (BEPUL) ==============================
-def add_promo(code, description=""):
+# ============================== PROMOKOD "CASE"LAR TIZIMI ==============================
+# 6 ta doimiy case (quti): promorasm1.jpg ... promorasm6.jpg rasmlari bilan.
+# Har birining nomi, tegishli o'yini va kerakli referal soni admin panelidan sozlanadi.
+DEFAULT_CASES = [
+    {"_id": 1, "name": "Bronza Case",  "game": "Standoff 2",     "referral_price": 3,  "image": "promorasm1.jpg"},
+    {"_id": 2, "name": "Kumush Case",  "game": "PUBG Mobile",    "referral_price": 5,  "image": "promorasm2.jpg"},
+    {"_id": 3, "name": "Oltin Case",   "game": "Free Fire",      "referral_price": 8,  "image": "promorasm3.jpg"},
+    {"_id": 4, "name": "Platina Case", "game": "CS2",            "referral_price": 12, "image": "promorasm4.jpg"},
+    {"_id": 5, "name": "Almaz Case",   "game": "Mobile Legends", "referral_price": 15, "image": "promorasm5.jpg"},
+    {"_id": 6, "name": "VIP Case",     "game": "Fortnite",       "referral_price": 20, "image": "promorasm6.jpg"},
+]
+
+
+def init_cases():
+    """Bot birinchi marta ishga tushganda 6 ta case'ni bazaga yozadi (mavjud bo'lsa tegmaydi)."""
     try:
-        promos_col.insert_one({
+        for c in DEFAULT_CASES:
+            cases_col.update_one(
+                {"_id": c["_id"]},
+                {"$setOnInsert": {
+                    "name": c["name"],
+                    "game": c["game"],
+                    "referral_price": c["referral_price"],
+                    "image": c["image"],
+                    "file_id": None,
+                    "fake_stock": random.randint(10, 47),
+                    "fake_stock_date": datetime.datetime.utcnow(),
+                }},
+                upsert=True,
+            )
+        log.info("Promo case'lar tayyor (1-6).")
+    except Exception as e:
+        log.error("init_cases xato: %s", e)
+
+
+def get_case(case_id):
+    try:
+        return cases_col.find_one({"_id": int(case_id)})
+    except Exception as e:
+        log.error("get_case xato: %s", e)
+        return None
+
+
+def get_all_cases():
+    try:
+        return list(cases_col.find().sort("_id", 1))
+    except Exception as e:
+        log.error("get_all_cases xato: %s", e)
+        return []
+
+
+def update_case(case_id, name=None, game=None, referral_price=None):
+    try:
+        fields = {}
+        if name is not None:
+            fields["name"] = name
+        if game is not None:
+            fields["game"] = game
+        if referral_price is not None:
+            fields["referral_price"] = referral_price
+        if not fields:
+            return False
+        cases_col.update_one({"_id": int(case_id)}, {"$set": fields})
+        return True
+    except Exception as e:
+        log.error("update_case xato: %s", e)
+        return False
+
+
+def ensure_fake_stock(case):
+    """'Necha borligi' — ko'z-ko'z uchun soxta miqdor, har 24 soatda tasodifiy yangilanadi (kamida 10)."""
+    try:
+        now = datetime.datetime.utcnow()
+        last = case.get("fake_stock_date")
+        if not last or (now - last).total_seconds() > 86400:
+            new_stock = random.randint(10, 47)
+            cases_col.update_one({"_id": case["_id"]}, {"$set": {"fake_stock": new_stock, "fake_stock_date": now}})
+            case = dict(case)
+            case["fake_stock"] = new_stock
+            case["fake_stock_date"] = now
+        return case
+    except Exception as e:
+        log.error("ensure_fake_stock xato: %s", e)
+        return case
+
+
+def get_case_image_path(case):
+    filename = case.get("image") or f"promorasm{case['_id']}.jpg"
+    return os.path.join(IMAGES_DIR, filename)
+
+
+def case_caption(case):
+    stock = case.get("fake_stock", 10)
+    return (
+        f"🆔 <b>Case ID:</b> {case['_id']}\n"
+        f"🎮 <b>Nomi:</b> {case.get('name', '—')}\n"
+        f"🤝 <b>Kerakli referal:</b> {case.get('referral_price', 0)} ta\n"
+        f"🕹 <b>O'yin:</b> {case.get('game', '—')}\n"
+        f"📦 <b>Qolgan:</b> {stock} dona\n\n"
+        f"👇 Olish uchun tugmani bosing"
+    )
+
+
+def send_case_card(chat_id, case):
+    """Case rasmi + bio + '🎁 Olish' tugmasi bilan xabar yuboradi."""
+    case = ensure_fake_stock(case)
+    caption = case_caption(case)
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🎁 Olish", callback_data=f"getcase:{case['_id']}"))
+
+    file_id = case.get("file_id")
+    try:
+        if file_id:
+            bot.send_photo(chat_id, file_id, caption=caption, reply_markup=markup)
+            return
+        path = get_case_image_path(case)
+        if os.path.isfile(path):
+            with open(path, "rb") as f:
+                msg = bot.send_photo(chat_id, f, caption=caption, reply_markup=markup)
+            if msg.photo:
+                cases_col.update_one({"_id": case["_id"]}, {"$set": {"file_id": msg.photo[-1].file_id}})
+            return
+    except Exception as e:
+        log.error("send_case_card (rasm) xato: %s", e)
+
+    # Rasm topilmasa ham bot ishlashda davom etsin — matn bilan yuboramiz.
+    try:
+        bot.send_message(chat_id, caption, reply_markup=markup)
+    except Exception as e:
+        log.error("send_case_card (matn) xato: %s", e)
+
+
+def add_case_code(case_id, code):
+    try:
+        codes_col.insert_one({
+            "case_id": int(case_id),
             "code": code,
-            "description": description,
+            "used": False,
+            "used_by": None,
+            "used_date": None,
             "added_date": datetime.datetime.utcnow(),
         })
         return True
     except Exception as e:
-        log.error("add_promo xato: %s", e)
+        log.error("add_case_code xato: %s", e)
         return False
 
 
-def get_all_promos(limit=30):
+def get_unused_codes(case_id, limit=15):
     try:
-        return list(promos_col.find().sort("added_date", DESCENDING).limit(limit))
+        return list(codes_col.find({"case_id": int(case_id), "used": False}).sort("added_date", 1).limit(limit))
     except Exception as e:
-        log.error("get_all_promos xato: %s", e)
+        log.error("get_unused_codes xato: %s", e)
         return []
 
 
-def delete_promo(promo_id):
+def delete_code(code_id):
     try:
-        result = promos_col.delete_one({"_id": ObjectId(promo_id)})
+        result = codes_col.delete_one({"_id": ObjectId(code_id)})
         return result.deleted_count > 0
     except (InvalidId, Exception) as e:
-        log.error("delete_promo xato: %s", e)
+        log.error("delete_code xato: %s", e)
         return False
+
+
+def claim_case_code(case_id, user_id):
+    """
+    Foydalanuvchi '🎁 Olish' bosganda ishlaydi.
+    Qaytaradi: (status, payload)
+      status == "notfound"     -> case topilmadi
+      status == "insufficient" -> referal yetarli emas, payload = kerakli referal soni
+      status == "already"      -> avval olingan, payload = o'sha kod
+      status == "empty"        -> case uchun kod qolmagan, payload = None
+      status == "ok"           -> yangi kod berildi, payload = kod matni
+    """
+    case = get_case(case_id)
+    if not case:
+        return "notfound", None
+
+    user = get_user(user_id) or {}
+    ref_count = user.get("referral_count", 0)
+    required = case.get("referral_price", 0)
+
+    if ref_count < required:
+        return "insufficient", required
+
+    existing = codes_col.find_one({"case_id": int(case_id), "used_by": user_id})
+    if existing:
+        return "already", existing["code"]
+
+    try:
+        doc = codes_col.find_one_and_update(
+            {"case_id": int(case_id), "used": False},
+            {"$set": {"used": True, "used_by": user_id, "used_date": datetime.datetime.utcnow()}},
+        )
+    except Exception as e:
+        log.error("claim_case_code xato: %s", e)
+        return "empty", None
+
+    if not doc:
+        return "empty", None
+    return "ok", doc["code"]
 
 
 # ============================== DO'KON / SAVDO (TOKENGA) ==============================
@@ -378,7 +557,7 @@ def cmd_start(message):
         f"{welcome}🐂 <b>BullDrop Promokod Bot</b>\n\n"
         "Bu yerda bepul promokodlarni olishingiz, referal orqali token "
         "to'plashingiz va do'konda ularni almashtirishingiz mumkin.\n\n"
-        "🎁 Promokodlar — bepul kodlar\n"
+        "🎁 Promokodlar — referal evaziga case ochib kod oling\n"
         "🛒 Do'kon — tokenga mahsulot\n"
         "🤝 Referal — do'st taklif qil, token yig'\n"
         "🏆 Reyting — eng faollar\n\n"
@@ -412,16 +591,54 @@ def menu_promos(message):
     if not check_subscription(message.from_user.id):
         send_subscription_message(message.chat.id)
         return
-    promos = get_all_promos()
-    if not promos:
-        bot.send_message(message.chat.id, "😔 Hozircha promokodlar mavjud emas. Keyinroq qayta tekshiring!")
+    cases = get_all_cases()
+    if not cases:
+        bot.send_message(message.chat.id, "😔 Hozircha case'lar sozlanmagan. Keyinroq qayta tekshiring!")
         return
-    lines = ["🎁 <b>Faol promokodlar:</b>\n"]
-    for p in promos:
-        desc = f" — {p['description']}" if p.get("description") else ""
-        lines.append(f"🔑 <code>{p['code']}</code>{desc}")
-    lines.append("\n💡 Kodni nusxalab, BullDrop saytida faollashtiring.")
-    bot.send_message(message.chat.id, "\n".join(lines)[:4000])
+    bot.send_message(
+        message.chat.id,
+        "🎁 <b>Promokodlar bo'limi</b>\n\n"
+        "Har bir case'ni ochish uchun yetarli miqdorda referal (taklif qilingan do'st) kerak. "
+        "Quyidagi case'lardan birini tanlang 👇",
+    )
+    for case in cases:
+        send_case_card(message.chat.id, case)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("getcase:"))
+@safe_handler
+def callback_get_case(call):
+    user_id = call.from_user.id
+    if not check_subscription(user_id):
+        bot.answer_callback_query(call.id, "🔒 Avval kanal(lar)ga obuna bo'ling!", show_alert=True)
+        return
+
+    case_id = call.data.split(":", 1)[1]
+    status, payload = claim_case_code(case_id, user_id)
+
+    if status == "notfound":
+        bot.answer_callback_query(call.id, "❌ Bu case topilmadi.", show_alert=True)
+    elif status == "insufficient":
+        bot.answer_callback_query(
+            call.id,
+            f"❌ Yetarli referalingiz yo'q!\nKerak: {payload} ta referal.\n\n"
+            f"🤝 Do'stlaringizni taklif qilib, referal balansingizni to'ldiring!",
+            show_alert=True,
+        )
+    elif status == "empty":
+        bot.answer_callback_query(
+            call.id,
+            "😔 Afsuski, bu case uchun promokodlar hozircha tugagan. Tez orada yangilanadi!",
+            show_alert=True,
+        )
+    elif status in ("ok", "already"):
+        bot.answer_callback_query(call.id, "✅ Promokodingiz tayyor!")
+        send_fun_animation(call.message.chat.id, "🎉")
+        bot.send_message(
+            call.message.chat.id,
+            f"🎁 <b>Sizning promokodingiz:</b>\n\n<code>{payload}</code>\n\n"
+            f"💡 Kodni nusxalab, saytda/o'yinda faollashtiring.",
+        )
 
 
 # ============================== MENYU: DO'KON ==============================
@@ -532,7 +749,7 @@ def menu_help(message):
     bot.send_message(
         message.chat.id,
         "ℹ️ <b>Yordam</b>\n\n"
-        "🎁 Promokodlar — bepul BullDrop kodlari\n"
+        "🎁 Promokodlar — referal to'plab case'lardan promokod oling\n"
         "🛒 Do'kon — tokenga mahsulot/kod sotib olish\n"
         "🤝 Referal — do'st taklif qilib token yig'ish\n"
         "🏆 Reyting — eng faol foydalanuvchilar\n\n"
@@ -545,8 +762,7 @@ def menu_help(message):
 def admin_menu_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("➕ Promokod qo'shish", callback_data="adm:addpromo"),
-        types.InlineKeyboardButton("🗑 Promokod o'chirish", callback_data="adm:delpromo"),
+        types.InlineKeyboardButton("🎁 Promokodlar", callback_data="pm:menu"),
     )
     markup.add(
         types.InlineKeyboardButton("🛒 Mahsulot qo'shish", callback_data="adm:additem"),
@@ -608,22 +824,6 @@ def callback_admin_menu(call):
         bot.edit_message_text("🛠 <b>Admin panel</b>\n\nKerakli bo'limni tanlang:", chat_id, msg_id,
                                reply_markup=admin_menu_keyboard())
 
-    elif action == "addpromo":
-        user_states[user_id] = {"step": "waiting_promo_code", "data": {}}
-        bot.edit_message_text("🔑 Yangi promokodni kiriting (masalan: BULL2026):\n\n/cancel — bekor qilish",
-                               chat_id, msg_id, reply_markup=back_to_menu_keyboard())
-
-    elif action == "delpromo":
-        promos = get_all_promos(15)
-        if not promos:
-            bot.edit_message_text("📃 Promokodlar mavjud emas.", chat_id, msg_id, reply_markup=back_to_menu_keyboard())
-        else:
-            markup = types.InlineKeyboardMarkup()
-            for p in promos:
-                markup.add(types.InlineKeyboardButton(f"🗑 {p['code']}", callback_data=f"delpromo:{p['_id']}"))
-            markup.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="adm:menu"))
-            bot.edit_message_text("🗑 O'chirmoqchi bo'lgan promokodni tanlang:", chat_id, msg_id, reply_markup=markup)
-
     elif action == "additem":
         user_states[user_id] = {"step": "waiting_item_name", "data": {}}
         bot.edit_message_text("🛒 Mahsulot nomini kiriting:\n\n/cancel — bekor qilish",
@@ -649,7 +849,10 @@ def callback_admin_menu(call):
         text = (
             f"📊 <b>Statistika</b>\n\n"
             f"👥 Foydalanuvchilar: {get_users_count()}\n"
-            f"🎁 Promokodlar: {promos_col.count_documents({})}\n"
+            f"🎁 Case'lar: {cases_col.count_documents({})}\n"
+            f"🔑 Promokodlar (jami): {codes_col.count_documents({})}\n"
+            f"✅ Ishlatilgan kodlar: {codes_col.count_documents({'used': True})}\n"
+            f"📦 Bo'sh (ishlatilmagan) kodlar: {codes_col.count_documents({'used': False})}\n"
             f"🛒 Mahsulotlar: {shop_col.count_documents({})}\n"
         )
         bot.edit_message_text(text, chat_id, msg_id, reply_markup=back_to_menu_keyboard())
@@ -662,28 +865,109 @@ def callback_admin_menu(call):
     bot.answer_callback_query(call.id)
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("delpromo:"))
+def cases_pick_keyboard(mode):
+    """mode: 'edit' | 'add' | 'delcase' -> har bir case uchun tugma, callback: pm:{mode}:{case_id}"""
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for case in get_all_cases():
+        markup.add(types.InlineKeyboardButton(
+            f"{case['_id']}. {case['name']}", callback_data=f"pm:{mode}:{case['_id']}"
+        ))
+    markup.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="pm:menu"))
+    return markup
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("pm:"))
 @safe_handler
-def callback_delete_promo(call):
-    if not is_admin(call.from_user.id):
-        bot.answer_callback_query(call.id, "⛔ Ruxsat yo'q.", show_alert=True)
+def callback_promo_management(call):
+    user_id = call.from_user.id
+    if not is_admin(user_id):
+        bot.answer_callback_query(call.id, "⛔ Sizda admin huquqi yo'q.", show_alert=True)
         return
-    promo_id = call.data.split(":", 1)[1]
-    ok = delete_promo(promo_id)
-    bot.answer_callback_query(call.id, "✅ O'chirildi!" if ok else "❌ Topilmadi.")
-    # ro'yxatni yangilash uchun qayta chizamiz
-    promos = get_all_promos(15)
-    markup = types.InlineKeyboardMarkup()
-    for p in promos:
-        markup.add(types.InlineKeyboardButton(f"🗑 {p['code']}", callback_data=f"delpromo:{p['_id']}"))
-    markup.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="adm:menu"))
-    try:
+
+    parts = call.data.split(":")
+    action = parts[1]
+    chat_id = call.message.chat.id
+    msg_id = call.message.message_id
+
+    if action == "menu":
+        user_states.pop(user_id, None)
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("✏️ Case sozlash", callback_data="pm:editlist"))
+        markup.add(types.InlineKeyboardButton("➕ Kod qo'shish", callback_data="pm:addlist"))
+        markup.add(types.InlineKeyboardButton("🗑 Kod o'chirish", callback_data="pm:dellist"))
+        markup.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="adm:menu"))
+        bot.edit_message_text("🎁 <b>Promokodlar boshqaruvi</b>\n\nKerakli amalni tanlang:", chat_id, msg_id, reply_markup=markup)
+
+    elif action == "editlist":
+        bot.edit_message_text("✏️ Sozlamoqchi bo'lgan case'ni tanlang:", chat_id, msg_id,
+                               reply_markup=cases_pick_keyboard("edit"))
+
+    elif action == "addlist":
+        bot.edit_message_text("➕ Kod qo'shmoqchi bo'lgan case'ni tanlang:", chat_id, msg_id,
+                               reply_markup=cases_pick_keyboard("add"))
+
+    elif action == "dellist" and len(parts) == 2:
+        bot.edit_message_text("🗑 Kod o'chirmoqchi bo'lgan case'ni tanlang:", chat_id, msg_id,
+                               reply_markup=cases_pick_keyboard("delcase"))
+
+    elif action == "edit" and len(parts) == 3:
+        case_id = int(parts[2])
+        case = get_case(case_id)
+        if not case:
+            bot.answer_callback_query(call.id, "❌ Case topilmadi.", show_alert=True)
+            return
+        user_states[user_id] = {"step": "waiting_case_name", "data": {"case_id": case_id}}
         bot.edit_message_text(
-            "🗑 O'chirmoqchi bo'lgan promokodni tanlang:" if promos else "📃 Promokodlar qolmadi.",
-            call.message.chat.id, call.message.message_id, reply_markup=markup,
+            f"✏️ <b>{case['name']}</b> (ID {case_id}) sozlanmoqda.\n\n"
+            f"1/3 — Yangi nomni kiriting (hozirgi: {case['name']}):\n\n/cancel — bekor qilish",
+            chat_id, msg_id,
         )
-    except Exception:
-        pass
+
+    elif action == "add" and len(parts) == 3:
+        case_id = int(parts[2])
+        case = get_case(case_id)
+        if not case:
+            bot.answer_callback_query(call.id, "❌ Case topilmadi.", show_alert=True)
+            return
+        user_states[user_id] = {"step": "waiting_case_code", "data": {"case_id": case_id}}
+        bot.edit_message_text(
+            f"➕ <b>{case['name']}</b> (ID {case_id}) uchun yangi promokodni kiriting:\n\n/cancel — bekor qilish",
+            chat_id, msg_id,
+        )
+
+    elif action == "delcase" and len(parts) == 3:
+        case_id = int(parts[2])
+        codes = get_unused_codes(case_id, 15)
+        if not codes:
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="pm:dellist"))
+            bot.edit_message_text("📃 Bu case uchun ishlatilmagan kodlar mavjud emas.", chat_id, msg_id, reply_markup=markup)
+        else:
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            for c in codes:
+                markup.add(types.InlineKeyboardButton(f"🗑 {c['code']}", callback_data=f"pm:delcode:{c['_id']}:{case_id}"))
+            markup.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="pm:dellist"))
+            bot.edit_message_text("🗑 O'chirmoqchi bo'lgan kodni tanlang:", chat_id, msg_id, reply_markup=markup)
+
+    elif action == "delcode" and len(parts) == 4:
+        code_id = parts[2]
+        case_id = int(parts[3])
+        ok = delete_code(code_id)
+        bot.answer_callback_query(call.id, "✅ O'chirildi!" if ok else "❌ Topilmadi.")
+        codes = get_unused_codes(case_id, 15)
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for c in codes:
+            markup.add(types.InlineKeyboardButton(f"🗑 {c['code']}", callback_data=f"pm:delcode:{c['_id']}:{case_id}"))
+        markup.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="pm:dellist"))
+        try:
+            bot.edit_message_text(
+                "🗑 O'chirmoqchi bo'lgan kodni tanlang:" if codes else "📃 Bu case uchun kodlar qolmadi.",
+                chat_id, msg_id, reply_markup=markup,
+            )
+        except Exception:
+            pass
+
+    bot.answer_callback_query(call.id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("delitem:"))
@@ -756,12 +1040,58 @@ def handle_text(message):
     if text.startswith("/"):
         return
 
-    # ---- PROMOKOD QO'SHISH ----
-    if step == "waiting_promo_code":
-        if add_promo(text):
-            bot.send_message(message.chat.id, f"✅ Promokod qo'shildi: <code>{text}</code>", reply_markup=back_to_menu_keyboard())
+    # ---- CASE SOZLASH: NOM ----
+    if step == "waiting_case_name":
+        state["data"]["name"] = text
+        state["step"] = "waiting_case_game"
+        bot.send_message(message.chat.id, "2/3 — O'yin nomini kiriting (masalan: PUBG Mobile):")
+        return
+
+    # ---- CASE SOZLASH: O'YIN ----
+    if step == "waiting_case_game":
+        state["data"]["game"] = text
+        state["step"] = "waiting_case_price"
+        bot.send_message(message.chat.id, "3/3 — Nechta referalga berilishini kiriting (butun son, masalan: 5):")
+        return
+
+    # ---- CASE SOZLASH: NARX (REFERAL SONI) ----
+    if step == "waiting_case_price":
+        if not text.isdigit():
+            bot.send_message(message.chat.id, "❗ Referal soni musbat butun son bo'lishi kerak. Qayta kiriting:")
+            return
+        data = state["data"]
+        ok = update_case(data["case_id"], name=data["name"], game=data["game"], referral_price=int(text))
+        if ok:
+            bot.send_message(
+                message.chat.id,
+                f"✅ Case yangilandi!\n\n"
+                f"🎮 Nomi: {data['name']}\n"
+                f"🕹 O'yin: {data['game']}\n"
+                f"🤝 Kerakli referal: {text} ta",
+                reply_markup=back_to_menu_keyboard(),
+            )
         else:
             bot.send_message(message.chat.id, "❌ Xatolik yuz berdi.", reply_markup=back_to_menu_keyboard())
+        user_states.pop(user_id, None)
+        return
+
+    # ---- PROMOKOD QO'SHISH (CASE'GA) ----
+    if step == "waiting_case_code":
+        case_id = state["data"]["case_id"]
+        case = get_case(case_id)
+        ok = add_case_code(case_id, text)
+        markup = types.InlineKeyboardMarkup()
+        if ok:
+            markup.add(types.InlineKeyboardButton("➕ Yana qo'shish", callback_data=f"pm:add:{case_id}"))
+        markup.add(types.InlineKeyboardButton("⬅️ Orqaga", callback_data="pm:menu"))
+        if ok:
+            bot.send_message(
+                message.chat.id,
+                f"✅ Promokod <b>{case['name'] if case else case_id}</b> case'iga qo'shildi:\n<code>{text}</code>",
+                reply_markup=markup,
+            )
+        else:
+            bot.send_message(message.chat.id, "❌ Xatolik yuz berdi.", reply_markup=markup)
         user_states.pop(user_id, None)
         return
 
@@ -918,6 +1248,7 @@ def setup_webhook():
 
 
 setup_webhook()
+init_cases()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)

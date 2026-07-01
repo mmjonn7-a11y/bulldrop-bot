@@ -125,6 +125,7 @@ def register_user(user_id, username, ref_payload):
                     f"🎉 Sizning taklifingiz bilan yangi foydalanuvchi qo'shildi!\n"
                     f"💰 +{REFERRAL_REWARD} token hisobingizga qo'shildi.",
                 )
+                send_fun_animation(referred_by, "🎯")
             except Exception:
                 pass
 
@@ -286,6 +287,8 @@ def is_admin(user_id):
 
 
 def check_subscription(user_id):
+    if is_admin(user_id):
+        return True
     if not CHANNELS:
         return True
     for channel in CHANNELS:
@@ -338,6 +341,16 @@ def main_menu_keyboard(user_id):
     return markup
 
 
+def send_fun_animation(chat_id, emoji="🎰"):
+    """Telegram'ning o'ziga xos animatsion emoji (dice) — stiker o'rnini bosadi.
+    Haqiqiy stiker file_id har bir botga xos bo'lgani uchun oldindan bera olmaymiz,
+    shuning uchun universal ishlaydigan animatsiyadan foydalanamiz."""
+    try:
+        bot.send_dice(chat_id, emoji=emoji)
+    except Exception as e:
+        log.warning("send_fun_animation xato: %s", e)
+
+
 def referral_link(user_id):
     if BOT_USERNAME:
         return f"https://t.me/{BOT_USERNAME}?start={user_id}"
@@ -358,12 +371,17 @@ def cmd_start(message):
         send_subscription_message(message.chat.id)
         return
 
+    send_fun_animation(message.chat.id, "🎰")
     welcome = "🎉 <b>Xush kelibsiz!</b>\n\n" if is_new else "👋 <b>Yana xush kelibsiz!</b>\n\n"
     bot.send_message(
         message.chat.id,
         f"{welcome}🐂 <b>BullDrop Promokod Bot</b>\n\n"
         "Bu yerda bepul promokodlarni olishingiz, referal orqali token "
         "to'plashingiz va do'konda ularni almashtirishingiz mumkin.\n\n"
+        "🎁 Promokodlar — bepul kodlar\n"
+        "🛒 Do'kon — tokenga mahsulot\n"
+        "🤝 Referal — do'st taklif qil, token yig'\n"
+        "🏆 Reyting — eng faollar\n\n"
         "Pastdagi tugmalardan birini tanlang 👇",
         reply_markup=main_menu_keyboard(user_id),
     )
@@ -437,9 +455,10 @@ def callback_buy_item(call):
     success, msg, item = buy_shop_item(call.from_user.id, item_id)
     bot.answer_callback_query(call.id, msg, show_alert=True)
     if success and item:
+        send_fun_animation(call.message.chat.id, "🎰")
         bot.send_message(
             call.message.chat.id,
-            f"✅ <b>{item['name']}</b> xaridingiz tayyor!\n\n📦 Mazmuni:\n<code>{item['content']}</code>",
+            f"🎉 <b>{item['name']}</b> xaridingiz tayyor!\n\n📦 Mazmuni:\n<code>{item['content']}</code>",
         )
 
 
@@ -842,7 +861,8 @@ WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}"
 @app.route(WEBHOOK_PATH, methods=["POST"])
 def telegram_webhook():
     try:
-        if request.headers.get("content-type") != "application/json":
+        content_type = request.headers.get("content-type", "")
+        if not content_type.startswith("application/json"):
             abort(403)
         json_str = request.get_data().decode("utf-8")
         update = telebot.types.Update.de_json(json_str)

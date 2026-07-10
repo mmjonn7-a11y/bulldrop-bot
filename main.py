@@ -8,7 +8,7 @@ from aiohttp import web
 # Token va Kanal yuzername'sini Render Environment Variables'dan olamiz
 API_TOKEN = os.environ.get("BOT_TOKEN")
 # Kanalingiz yuzername'si Render'da masalan @mening_kanalim ko'rinishida yoziladi
-CHANNEL_ID = os.environ.get("CHANNEL_ID") 
+CHANNEL_ID = os.environ.get("@uzbekroblox") 
 
 if not API_TOKEN:
     raise ValueError("Xatolik: BOT_TOKEN muhit o'zgaruvchisi topilmadi!")
